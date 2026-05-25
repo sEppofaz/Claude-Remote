@@ -1,7 +1,7 @@
-# Claude Agent – Josef Fischer
+# Claude Remote – Josef Fischer
 
 ## Überblick
-Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und Hetzner-Server. Unabhängig von Vereinskalender. Chat-Interface mit Write-Gate (Bestätigung vor jedem Schreibzugriff).
+Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und Hetzner-Server. Unabhängig von Vereinskalender. Chat-Interface mit Write-Gate (Bestätigung vor jedem Schreibzugriff). Nachfolger des alten Claude Remote Blueprints in Vereinskalender.
 
 ## Phasen
 
@@ -12,40 +12,32 @@ Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und 
 | 3 | Hetzner Shell: `git pull`, `systemctl restart` per Tool | geplant |
 
 ## Lokaler Pfad
-`~/Dropbox/Apps/Claude/Claude-Agent/`
+`~/Dropbox/Apps/Claude/Claude-Remote/`
 
 ## GitHub
-Noch anlegen → `sEppofaz/Claude-Agent`
+`https://github.com/sEppofaz/Claude-Remote`
 
 ## Deployment auf Hetzner
 
 - **Port:** 8082 (intern)
-- **Service-Pfad:** `/opt/claude-agent/`
-- **Systemd:** `claude-agent.service`
-- **Nginx-Pfad:** `/agent/` → `http://127.0.0.1:8082/`
+- **Service-Pfad:** `/opt/claude-remote/`
+- **Systemd:** `claude-remote.service`
+- **Nginx-Pfad:** `/claude-remote/` → `http://127.0.0.1:8082/`
+- **Nginx-Config:** `/etc/nginx/sites-enabled/rename-webhook`
+- **Auth:** BasicAuth via `/etc/nginx/claude-remote.htpasswd`
 - **Secrets:** `/etc/pka/secrets.env` (gelesen via `_load_secrets()`)
 
-### Nginx-Snippet (zu `/etc/nginx/sites-enabled/` hinzufügen)
-```nginx
-location /agent/ {
-    proxy_pass http://127.0.0.1:8082/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
-```
-
-### Systemd Service (`/etc/systemd/system/claude-agent.service`)
+### Systemd Service (`/etc/systemd/system/claude-remote.service`)
 ```ini
 [Unit]
-Description=Claude Agent
+Description=Claude Remote
 After=network.target
 
 [Service]
 Environment=HOME=/tmp
 User=www-data
-WorkingDirectory=/opt/claude-agent
-ExecStart=/opt/claude-agent/bin/gunicorn -w 1 -b 127.0.0.1:8082 --worker-tmp-dir /tmp app:app
+WorkingDirectory=/opt/claude-remote
+ExecStart=/opt/claude-remote/bin/gunicorn -w 1 -b 127.0.0.1:8082 --worker-tmp-dir /tmp app:app
 Restart=on-failure
 RestartSec=5
 
@@ -53,41 +45,28 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### Server-Setup (einmalig)
+### Aktualisierung (Standard-Flow)
 ```bash
-# Dateien hochladen:
-scp -r ~/Dropbox/Apps/Claude/Claude-Agent root@89.167.104.145:/opt/claude-agent
+# 1. Lokal ändern + pushen:
+git -C ~/Dropbox/Apps/Claude/Claude-Remote push
 
-# Venv + Pakete:
-cd /opt/claude-agent
-python3 -m venv .
-bin/pip install -r requirements.txt
-
-# Icons generieren:
-bin/python3 generate_icons.py
-
-# Service starten:
-cp claude-agent.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now claude-agent
-
-# Nginx neu laden:
-nginx -t && systemctl reload nginx
+# 2. Auf Server deployen:
+ssh root@89.167.104.145 "git -C /opt/claude-remote pull && systemctl restart claude-remote"
 ```
 
-### Aktualisierung
+### Icons neu generieren (lokal)
 ```bash
-scp ~/Dropbox/Apps/Claude/Claude-Agent/app.py root@89.167.104.145:/opt/claude-agent/
-scp ~/Dropbox/Apps/Claude/Claude-Agent/static/index.html root@89.167.104.145:/opt/claude-agent/static/
-systemctl restart claude-agent
+cd ~/Dropbox/Apps/Claude/Claude-Remote
+python3 generate_icons.py
+# dann: git add static/*.png && commit + push + server pull
 ```
 
 ## Dateistruktur
 ```
-Claude-Agent/
+Claude-Remote/
 ├── app.py              # Flask-App (Phase 1: Dropbox-Tools)
 ├── requirements.txt
-├── generate_icons.py   # Icon-Generator (stdlib, kein Pillow)
+├── generate_icons.py   # Icon-Generator (stdlib, kein Pillow) – CR-Monogramm
 ├── CLAUDE.md
 └── static/
     ├── index.html      # Chat-UI (PWA)
@@ -106,7 +85,7 @@ Claude-Agent/
 | `server:` | `/opt/kargl-invoice/` |
 | `server:` | `/opt/project-insight/` |
 | `server:` | `/opt/autoquartett/` |
-| `server:` | `/opt/claude-agent/` |
+| `server:` | `/opt/claude-remote/` |
 | `server:` | `/opt/traktoren/` |
 
 ## Pitfalls
@@ -114,6 +93,7 @@ Claude-Agent/
 - `write_file` überschreibt immer komplett (kein Patch) → immer erst `read_file` aufrufen
 - Secrets werden bei jedem Request frisch geladen (kein Cache)
 - Relative API-Pfade im Frontend (`api/chat`) → korrekt über nginx-Proxy mit trailing slash
+- **⚠️ NIEMALS `python3 -m venv --clear .` in `/opt/claude-remote/` ausführen** → löscht alle App-Dateien im Verzeichnis (Vorfall 2026-05-25). Stattdessen: frische venv außerhalb anlegen oder Dateien vorher sichern.
 
 ## Phase 2 – GitHub API (geplant)
 Neues Tool `github_api` mit Aktionen: `list_repos`, `create_repo`, `read_file`, `write_file`, `list_commits`.
