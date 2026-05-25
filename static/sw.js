@@ -1,4 +1,4 @@
-const CACHE = "claude-agent-v1";
+const CACHE = "claude-remote-v1";
 const SHELL = ["./", "./index.html", "./manifest.json"];
 
 self.addEventListener("install", e => {

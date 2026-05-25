@@ -1,6 +1,6 @@
 {
-  "name": "Claude Agent",
-  "short_name": "Agent",
+  "name": "Claude Remote",
+  "short_name": "Remote",
   "description": "KI-Agent mit direktem Zugriff auf Josefs Projektdateien",
   "start_url": ".",
   "display": "standalone",
