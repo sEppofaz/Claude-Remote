@@ -42,10 +42,12 @@ Description=Claude Agent
 After=network.target
 
 [Service]
+Environment=HOME=/tmp
 User=www-data
 WorkingDirectory=/opt/claude-agent
-ExecStart=/opt/claude-agent/bin/gunicorn -w 1 -b 127.0.0.1:8082 app:app
+ExecStart=/opt/claude-agent/bin/gunicorn -w 1 -b 127.0.0.1:8082 --worker-tmp-dir /tmp app:app
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
