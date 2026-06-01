@@ -9,7 +9,7 @@ Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und 
 |-------|--------|--------|
 | 1 | Dropbox read/write/list für `/Apps/Claude/**` | ✅ umgesetzt |
 | 2 | GitHub API: Repos erstellen, Dateien pushen, Commits | geplant |
-| 3 | Hetzner Shell: `git pull`, `systemctl restart` per Tool | geplant |
+| 3 | Hetzner Shell: `pip upgrade`, `git pull`, `systemctl restart` per Tool | ✅ umgesetzt |
 
 ## Lokaler Pfad
 `~/Dropbox/Apps/Claude/Claude-Remote/`
@@ -89,6 +89,7 @@ Claude-Remote/
 | `server:` | `/opt/traktoren/` |
 
 ## Pitfalls
+- **⚠️ nginx location-Block** `/claude-remote/` in `/etc/nginx/sites-enabled/rename-webhook` kann bei Aufräumaktionen versehentlich gelöscht werden → App gibt 404, Service läuft weiter. Fix: Block wiederherstellen (BasicAuth + proxy_pass 8082) + `nginx -t && systemctl reload nginx`
 - `_pending` Dict ist in-memory → offene Write-Gates gehen bei Service-Neustart verloren
 - `write_file` überschreibt immer komplett (kein Patch) → immer erst `read_file` aufrufen
 - Secrets werden bei jedem Request frisch geladen (kein Cache)
@@ -99,9 +100,14 @@ Claude-Remote/
 Neues Tool `github_api` mit Aktionen: `list_repos`, `create_repo`, `read_file`, `write_file`, `list_commits`.
 Credentials: `GITHUB_TOKEN` in `/etc/pka/secrets.env`.
 
-## Phase 3 – Hetzner Shell (geplant)
-Neues Tool `run_shell` mit Whitelist erlaubter Befehle:
-- `git -C /opt/{projekt} pull`
-- `systemctl restart {service}`
-- `systemctl status {service}`
-Nur auf expliziten Wunsch + separate Bestätigung.
+## Phase 3 – Hetzner Shell ✅
+
+Tool `run_shell` mit Whitelist-Aktionen:
+- `service_status` – sofort (kein Gate), alle Services in `_SERVICES`
+- `pip_upgrade` – Shell-Gate (Bestätigung), alle Apps in `_VENVS`
+- `service_restart` – Shell-Gate, alle Services in `_SERVICES`
+- `git_pull` – Shell-Gate, alle Projekte in `_GIT_PROJECTS`
+
+**Sudo-Regeln:** `/etc/sudoers.d/claude-remote` (chmod 0440) – www-data darf whitelisted pip/systemctl/git als root.
+**Pitfall git pull:** Erfordert `-c safe.directory=...` (ownership-Check seit git 2.35).
+**Endpoint:** `POST /api/confirm-shell` mit `{shell_id, confirmed}`.
