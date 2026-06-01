@@ -90,7 +90,8 @@ Regeln:
 - Bei unklaren Aufträgen nachfragen
 - Vor write_file immer read_file aufrufen
 - run_shell nur für klar beschriebene Aktionen aufrufen
-- Nach pip_upgrade empfehlen ob service_restart nötig ist\
+- Nach pip_upgrade empfehlen ob service_restart nötig ist
+- Bei „Kernel updaten" oder „Kernel-Update": apt_upgrade mit target='kernel' aufrufen\
 """
 
 TOOLS = [
@@ -143,7 +144,8 @@ TOOLS = [
             "'pip_upgrade' – Paket upgraden (erfordert Bestätigung); "
             "'service_restart' – Service neustarten (erfordert Bestätigung); "
             "'service_status' – Status lesen (sofort, keine Bestätigung); "
-            "'git_pull' – git pull für ein Projekt (erfordert Bestätigung). "
+            "'git_pull' – git pull für ein Projekt (erfordert Bestätigung); "
+            "'apt_upgrade' – Kernel-Update einspielen via apt dist-upgrade (erfordert Bestätigung, target='kernel'). "
             "Apps/Services: rename-webhook, claude-remote, kargl-invoice, life-doku, rechnungen. "
             "Git-Projekte zusätzlich: project-insight."
         ),
@@ -152,9 +154,9 @@ TOOLS = [
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["pip_upgrade", "service_restart", "service_status", "git_pull"],
+                    "enum": ["pip_upgrade", "service_restart", "service_status", "git_pull", "apt_upgrade"],
                 },
-                "target": {"type": "string", "description": "App- oder Service-Name"},
+                "target": {"type": "string", "description": "App- oder Service-Name; für apt_upgrade: 'kernel'"},
                 "package": {"type": "string", "description": "Paketname für pip_upgrade"},
             },
             "required": ["action", "target"],
@@ -282,12 +284,22 @@ def _build_shell_cmd(action: str, target: str, package: str | None) -> tuple[lis
             f"git -C {path} pull",
         )
 
+    if action == "apt_upgrade":
+        if target != "kernel":
+            raise ValueError("apt_upgrade: target muss 'kernel' sein")
+        return (
+            ["sudo", "apt-get", "dist-upgrade", "-y",
+             "-o", "Dpkg::Options::=--force-confdef",
+             "-o", "Dpkg::Options::=--force-confold"],
+            "apt-get dist-upgrade (Kernel-Update)",
+        )
+
     raise ValueError(f"Unbekannte Aktion: {action}")
 
 
-def _run_shell_cmd(cmd: list[str]) -> str:
+def _run_shell_cmd(cmd: list[str], timeout: int = 120) -> str:
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         out = (result.stdout + result.stderr).strip()
         return out[:3000] if out else "(kein Output)"
     except subprocess.TimeoutExpired:
@@ -406,6 +418,7 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
                     shell_id = str(_uuid.uuid4())
                     _pending[shell_id] = {
                         "type": "shell",
+                        "action": action,
                         "cmd": cmd,
                         "display": display,
                         "tool_use_id": block.id,
@@ -514,7 +527,8 @@ def confirm_shell():
         return jsonify({"error": "Shell-ID unbekannt oder abgelaufen (Service-Neustart?)"}), 404
     secrets = _load_secrets()
     if confirmed:
-        output = _run_shell_cmd(pending["cmd"])
+        timeout = 300 if pending.get("action") == "apt_upgrade" else 120
+        output = _run_shell_cmd(pending["cmd"], timeout=timeout)
         msg = f"Befehl ausgeführt:\n{output}"
     else:
         msg = "Befehl vom User abgelehnt."
