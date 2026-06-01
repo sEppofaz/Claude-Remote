@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Claude Agent – Flask-Service (Phase 1: Dropbox, Phase 3: Hetzner Shell)."""
+import functools
+import hmac as _hmac
 import re
 import subprocess
 import uuid as _uuid
+from datetime import timedelta
 from pathlib import Path
 
 import anthropic
 import dropbox
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory, session
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent / "static"))
 
+BASE_PATH = "/claude-remote"
 _SECRETS_FILE = "/etc/pka/secrets.env"
+_SESSION_KEY_FILE = Path(__file__).parent / ".session_key"
+_HTPASSWD_FILE = "/etc/nginx/claude-remote.htpasswd"
 _ALLOWED_DROPBOX_PREFIX = "/Apps/Claude"
 _ALLOWED_SERVER_ROOTS = (
     "/opt/rename-webhook",
@@ -44,6 +50,41 @@ _MODEL = "claude-sonnet-4-6"
 
 # In-Memory – geht bei Service-Neustart verloren (bekanntes Pitfall)
 _pending: dict = {}
+
+
+def _get_or_create_session_key() -> str:
+    if _SESSION_KEY_FILE.exists():
+        return _SESSION_KEY_FILE.read_text().strip()
+    import secrets as _sec
+    key = _sec.token_hex(32)
+    _SESSION_KEY_FILE.write_text(key)
+    _SESSION_KEY_FILE.chmod(0o600)
+    return key
+
+
+app.secret_key = _get_or_create_session_key()
+app.permanent_session_lifetime = timedelta(days=30)
+
+
+def _check_password(password: str) -> bool:
+    try:
+        from passlib.apache import HtpasswdFile
+        ht = HtpasswdFile(_HTPASSWD_FILE)
+        users = list(ht.users())
+        if not users:
+            return False
+        return bool(ht.check_password(users[0], password))
+    except Exception:
+        return False
+
+
+def login_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect(BASE_PATH + "/login")
+        return f(*args, **kwargs)
+    return decorated
 
 
 def _load_secrets() -> dict:
@@ -455,8 +496,28 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("authenticated"):
+        return redirect(BASE_PATH + "/")
+    if request.method == "POST":
+        if _check_password(request.form.get("password", "")):
+            session.permanent = True
+            session["authenticated"] = True
+            return redirect(BASE_PATH + "/")
+        return redirect(BASE_PATH + "/login?error=1")
+    return send_from_directory(app.static_folder, "login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(BASE_PATH + "/login")
+
+
 @app.route("/")
 @app.route("/index.html")
+@login_required
 def index():
     return send_from_directory(app.static_folder, "index.html")
 
@@ -467,6 +528,7 @@ def static_file(filename):
 
 
 @app.route("/api/chat", methods=["POST"])
+@login_required
 def chat():
     data = request.get_json(silent=True) or {}
     user_text = (data.get("message") or "").strip()
@@ -485,6 +547,7 @@ def chat():
 
 
 @app.route("/api/confirm-write", methods=["POST"])
+@login_required
 def confirm_write():
     data = request.get_json(silent=True) or {}
     write_id = data.get("write_id", "")
@@ -518,6 +581,7 @@ def confirm_write():
 
 
 @app.route("/api/confirm-shell", methods=["POST"])
+@login_required
 def confirm_shell():
     data = request.get_json(silent=True) or {}
     shell_id = data.get("shell_id", "")
