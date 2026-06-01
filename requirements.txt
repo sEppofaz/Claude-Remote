@@ -3,3 +3,4 @@ anthropic>=0.40
 dropbox>=12.0
 gunicorn>=22.0
 passlib>=1.7
+PyGithub>=2.0

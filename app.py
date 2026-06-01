@@ -113,6 +113,11 @@ Josefs Projekte auf Dropbox (Präfix dropbox:):
 - Claude Agent:                dropbox:/Apps/Claude/Claude-Agent/
 - Todo-App:                    dropbox:/Apps/Claude/ToDo-App/
 
+Josefs GitHub-Repos (github_api Tool):
+- sEppofaz/Vereinskalender, sEppofaz/Claude-Remote, sEppofaz/Vokabeltrainer
+- sEppofaz/Messwerte-sEpp, sEppofaz/PKA-Todos, sEppofaz/Project-Insight-App
+- sEppofaz/Rauchmelder, sEppofaz/Traktoren (weitere via list_repos ermitteln)
+
 Josefs Projekte auf Hetzner-Server (Präfix server:):
 - Vereinskalender / Claude Remote: server:/opt/rename-webhook/
 - Kargl Rechnungen:               server:/opt/kargl-invoice/
@@ -175,6 +180,34 @@ TOOLS = [
                 "content": {"type": "string", "description": "Vollständiger neuer Dateiinhalt"},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "github_api",
+        "description": (
+            "Zugriff auf Josefs GitHub-Repos. "
+            "Aktionen: "
+            "'list_repos' – alle Repos auflisten (sofort); "
+            "'read_file' – Datei aus Repo lesen (sofort); "
+            "'list_commits' – letzte Commits (sofort); "
+            "'write_file' – Datei erstellen/überschreiben (erfordert Bestätigung); "
+            "'create_repo' – neues Repo anlegen (erfordert Bestätigung)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_repos", "read_file", "list_commits", "write_file", "create_repo"],
+                },
+                "repo": {"type": "string", "description": "Repo-Name, z.B. 'sEppofaz/Vereinskalender'"},
+                "path": {"type": "string", "description": "Dateipfad im Repo, z.B. 'src/app.py'"},
+                "content": {"type": "string", "description": "Vollständiger Dateiinhalt für write_file"},
+                "message": {"type": "string", "description": "Commit-Message für write_file"},
+                "name": {"type": "string", "description": "Repo-Name für create_repo"},
+                "private": {"type": "boolean", "description": "Privates Repo? (default: true)"},
+            },
+            "required": ["action"],
         },
     },
     {
@@ -349,6 +382,62 @@ def _run_shell_cmd(cmd: list[str], timeout: int = 120) -> str:
         return f"Fehler: {e}"
 
 
+def _gh(secrets):
+    from github import Github
+    return Github(secrets["GITHUB_TOKEN"])
+
+
+def _tool_github(action: str, inp: dict, secrets: dict) -> str:
+    try:
+        g = _gh(secrets)
+        if action == "list_repos":
+            repos = sorted(g.get_user().get_repos(), key=lambda r: r.updated_at, reverse=True)
+            return "\n".join(
+                f"{'🔒' if r.private else '🌐'} {r.full_name} – {r.description or '–'}"
+                for r in repos
+            ) or "(keine Repos)"
+        if action == "read_file":
+            repo, path = inp.get("repo", ""), inp.get("path", "")
+            fc = g.get_repo(repo).get_contents(path)
+            if isinstance(fc, list):
+                return "Verzeichnis: " + ", ".join(f.name for f in fc)
+            data = fc.decoded_content
+            if len(data) > _MAX_FILE_BYTES:
+                return f"Datei zu groß ({len(data)} Bytes)"
+            return data.decode("utf-8", errors="replace")
+        if action == "list_commits":
+            repo = inp.get("repo", "")
+            commits = list(g.get_repo(repo).get_commits()[:15])
+            return "\n".join(
+                f"{c.sha[:7]} {c.commit.message.splitlines()[0][:60]} ({c.commit.author.date.strftime('%Y-%m-%d')})"
+                for c in commits
+            ) or "(keine Commits)"
+        return f"Unbekannte Aktion: {action}"
+    except Exception as e:
+        return f"GitHub-Fehler: {e}"
+
+
+def _do_github_write(repo: str, path: str, content: str, message: str, secrets: dict) -> str:
+    try:
+        r = _gh(secrets).get_repo(repo)
+        try:
+            existing = r.get_contents(path)
+            r.update_file(path, message, content.encode("utf-8"), existing.sha)
+        except Exception:
+            r.create_file(path, message, content.encode("utf-8"))
+        return "OK"
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
+def _do_github_create_repo(name: str, private: bool, secrets: dict) -> str:
+    try:
+        repo = _gh(secrets).get_user().create_repo(name, private=private)
+        return repo.html_url
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
 def _blk(b) -> dict:
     return b.model_dump() if hasattr(b, "model_dump") else b
 
@@ -430,6 +519,75 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
                         None,
                         messages,
                     )
+
+                if block.name == "github_api":
+                    gh_action = block.input.get("action", "")
+
+                    if gh_action in ("list_repos", "read_file", "list_commits"):
+                        result = _tool_github(gh_action, block.input, secrets)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+                        continue
+
+                    if gh_action == "write_file":
+                        repo = block.input.get("repo", "")
+                        path = block.input.get("path", "")
+                        new_content = block.input.get("content", "")
+                        message = block.input.get("message", "Claude Remote: Datei aktualisiert")
+                        old_content = _tool_github("read_file", {"repo": repo, "path": path}, secrets)
+                        write_id = str(_uuid.uuid4())
+                        _pending[write_id] = {
+                            "type": "github_write",
+                            "repo": repo,
+                            "path": path,
+                            "old_content": old_content,
+                            "new_content": new_content,
+                            "message": message,
+                            "tool_use_id": block.id,
+                            "messages": messages,
+                        }
+                        prefix = " ".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+                        return (
+                            prefix or "GitHub-Datei ändern – bitte bestätigen:",
+                            {
+                                "write_id": write_id,
+                                "path": f"github:{repo}/{path}",
+                                "old_content": old_content,
+                                "new_content": new_content,
+                            },
+                            None,
+                            messages,
+                        )
+
+                    if gh_action == "create_repo":
+                        name = block.input.get("name", "")
+                        private = block.input.get("private", True)
+                        shell_id = str(_uuid.uuid4())
+                        display = f"GitHub Repo erstellen: {name} ({'privat' if private else 'öffentlich'})"
+                        _pending[shell_id] = {
+                            "type": "github_create_repo",
+                            "name": name,
+                            "private": private,
+                            "tool_use_id": block.id,
+                            "messages": messages,
+                        }
+                        prefix = " ".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+                        return (
+                            prefix or "GitHub-Repo erstellen – bitte bestätigen:",
+                            None,
+                            {"shell_id": shell_id, "cmd_display": display},
+                            messages,
+                        )
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Unbekannte github_api-Aktion: {gh_action}",
+                    })
+                    continue
 
                 if block.name == "run_shell":
                     action  = block.input.get("action", "")
@@ -556,7 +714,20 @@ def confirm_write():
     if not pending:
         return jsonify({"error": "Write-ID unbekannt oder abgelaufen (Service-Neustart?)"}), 404
     secrets = _load_secrets()
-    if confirmed:
+    if pending.get("type") == "github_write":
+        if confirmed:
+            result = _do_github_write(
+                pending["repo"], pending["path"],
+                pending["new_content"], pending["message"], secrets,
+            )
+            msg = (
+                f"GitHub-Datei geschrieben: {pending['repo']}/{pending['path']}"
+                if result == "OK"
+                else f"Fehler: {result}"
+            )
+        else:
+            msg = "GitHub-Schreiboperation abgelehnt."
+    elif confirmed:
         result = _do_write(
             pending["path"], pending["new_content"], pending["is_dropbox"], secrets
         )
@@ -590,7 +761,17 @@ def confirm_shell():
     if not pending:
         return jsonify({"error": "Shell-ID unbekannt oder abgelaufen (Service-Neustart?)"}), 404
     secrets = _load_secrets()
-    if confirmed:
+    if pending.get("type") == "github_create_repo":
+        if confirmed:
+            url = _do_github_create_repo(pending["name"], pending["private"], secrets)
+            msg = (
+                f"Repo erstellt: {url}"
+                if url.startswith("https://")
+                else url
+            )
+        else:
+            msg = "Repo-Erstellung abgelehnt."
+    elif confirmed:
         timeout = 300 if pending.get("action") == "apt_upgrade" else 120
         output = _run_shell_cmd(pending["cmd"], timeout=timeout)
         msg = f"Befehl ausgeführt:\n{output}"
