@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Claude Agent – eigenständiger Flask-Service (Phase 1: Dropbox-Zugriff)."""
+"""Claude Agent – Flask-Service (Phase 1: Dropbox, Phase 3: Hetzner Shell)."""
+import re
+import subprocess
 import uuid as _uuid
 from pathlib import Path
 
@@ -16,9 +18,27 @@ _ALLOWED_SERVER_ROOTS = (
     "/opt/kargl-invoice",
     "/opt/project-insight",
     "/opt/autoquartett",
-    "/opt/claude-agent",
+    "/opt/claude-remote",
     "/opt/traktoren",
 )
+
+# Phase 3 – Shell-Whitelist
+_VENVS = {
+    "rename-webhook": {"pip": "/opt/rename-webhook/bin/pip",  "sudo": True},
+    "claude-remote":  {"pip": "/opt/claude-remote/bin/pip",   "sudo": False},
+    "kargl-invoice":  {"pip": "/opt/kargl-invoice/bin/pip",   "sudo": True},
+    "life-doku":      {"pip": "/opt/life-doku/venv/bin/pip",  "sudo": True},
+    "rechnungen":     {"pip": "/opt/rechnungen/venv/bin/pip", "sudo": True},
+}
+_SERVICES = {"rename-webhook", "claude-remote", "kargl-invoice", "life-doku", "rechnungen"}
+_GIT_PROJECTS = {
+    "rename-webhook": "/opt/rename-webhook",
+    "claude-remote":  "/opt/claude-remote",
+    "kargl-invoice":  "/opt/kargl-invoice",
+    "life-doku":      "/opt/life-doku",
+    "rechnungen":     "/opt/rechnungen",
+    "project-insight": "/opt/project-insight",
+}
 _MAX_FILE_BYTES = 100_000
 _MODEL = "claude-sonnet-4-6"
 
@@ -39,7 +59,7 @@ def _load_secrets() -> dict:
 
 
 SYSTEM_PROMPT = """\
-Du bist Josefs persönlicher Programm-Assistent mit direktem Zugriff auf seine Projektdateien.
+Du bist Josefs persönlicher Programm-Assistent mit direktem Zugriff auf seine Projektdateien und den Hetzner-Server.
 
 Josefs Projekte auf Dropbox (Präfix dropbox:):
 - PKA / Logbuch / Todos:       dropbox:/Apps/Claude/PKA/
@@ -68,7 +88,9 @@ Vorgehen bei Änderungen:
 Regeln:
 - Immer auf Deutsch antworten, kurz und präzise
 - Bei unklaren Aufträgen nachfragen
-- Vor write_file immer read_file aufrufen\
+- Vor write_file immer read_file aufrufen
+- run_shell nur für klar beschriebene Aktionen aufrufen
+- Nach pip_upgrade empfehlen ob service_restart nötig ist\
 """
 
 TOOLS = [
@@ -111,6 +133,31 @@ TOOLS = [
                 "content": {"type": "string", "description": "Vollständiger neuer Dateiinhalt"},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "run_shell",
+        "description": (
+            "Führt einen whitelisted Server-Befehl aus. "
+            "Aktionen: "
+            "'pip_upgrade' – Paket upgraden (erfordert Bestätigung); "
+            "'service_restart' – Service neustarten (erfordert Bestätigung); "
+            "'service_status' – Status lesen (sofort, keine Bestätigung); "
+            "'git_pull' – git pull für ein Projekt (erfordert Bestätigung). "
+            "Apps/Services: rename-webhook, claude-remote, kargl-invoice, life-doku, rechnungen. "
+            "Git-Projekte zusätzlich: project-insight."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["pip_upgrade", "service_restart", "service_status", "git_pull"],
+                },
+                "target": {"type": "string", "description": "App- oder Service-Name"},
+                "package": {"type": "string", "description": "Paketname für pip_upgrade"},
+            },
+            "required": ["action", "target"],
         },
     },
 ]
@@ -202,6 +249,53 @@ def _do_write(path: str, content: str, is_dropbox: bool, secrets: dict) -> str:
         return f"Fehler: {e}"
 
 
+def _build_shell_cmd(action: str, target: str, package: str | None) -> tuple[list[str], str]:
+    """Baut whitelisted Befehl. Wirft ValueError bei Verstoß."""
+    if action == "pip_upgrade":
+        if target not in _VENVS:
+            raise ValueError(f"App '{target}' nicht in Whitelist")
+        if not package or not re.match(r"^[a-zA-Z0-9_\-\.]+$", package):
+            raise ValueError("Ungültiger Paketname")
+        info = _VENVS[target]
+        cmd = (["sudo"] if info["sudo"] else []) + [info["pip"], "install", "--upgrade", package]
+        return cmd, f"pip install --upgrade {package}  [{target}]"
+
+    if action == "service_restart":
+        if target not in _SERVICES:
+            raise ValueError(f"Service '{target}' nicht in Whitelist")
+        return ["sudo", "systemctl", "restart", target], f"systemctl restart {target}"
+
+    if action == "service_status":
+        if target not in _SERVICES:
+            raise ValueError(f"Service '{target}' nicht in Whitelist")
+        return (
+            ["systemctl", "status", "--no-pager", "--lines=20", target],
+            f"systemctl status {target}",
+        )
+
+    if action == "git_pull":
+        if target not in _GIT_PROJECTS:
+            raise ValueError(f"Projekt '{target}' nicht in Whitelist")
+        path = _GIT_PROJECTS[target]
+        return (
+            ["sudo", "git", "-c", f"safe.directory={path}", "-C", path, "pull"],
+            f"git -C {path} pull",
+        )
+
+    raise ValueError(f"Unbekannte Aktion: {action}")
+
+
+def _run_shell_cmd(cmd: list[str]) -> str:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        out = (result.stdout + result.stderr).strip()
+        return out[:3000] if out else "(kein Output)"
+    except subprocess.TimeoutExpired:
+        return "Timeout nach 120s"
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
 def _blk(b) -> dict:
     return b.model_dump() if hasattr(b, "model_dump") else b
 
@@ -219,7 +313,8 @@ def _serialize(messages: list) -> list:
 
 
 def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
-    """Agentic Loop. Pausiert bei write_file für Bestätigung."""
+    """Agentic Loop. Pausiert bei write_file/run_shell für Bestätigung.
+    Rückgabe: (text, pending_write, pending_shell, messages)"""
     client = anthropic.Anthropic(api_key=secrets["CLAUDE_API_KEY"])
 
     for _ in range(max_rounds):
@@ -236,7 +331,7 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
 
         if resp.stop_reason == "end_turn":
             text = " ".join(b.text for b in resp.content if hasattr(b, "text")).strip()
-            return text, None, messages
+            return text, None, None, messages
 
         if resp.stop_reason == "tool_use":
             tool_results = []
@@ -259,6 +354,7 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
                     old_content = _tool_read_file(path_raw, secrets)
                     write_id = str(_uuid.uuid4())
                     _pending[write_id] = {
+                        "type": "write",
                         "path": path,
                         "path_raw": path_raw,
                         "is_dropbox": is_dropbox,
@@ -278,6 +374,50 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
                             "old_content": old_content,
                             "new_content": new_content,
                         },
+                        None,
+                        messages,
+                    )
+
+                if block.name == "run_shell":
+                    action  = block.input.get("action", "")
+                    target  = block.input.get("target", "")
+                    package = block.input.get("package")
+                    try:
+                        cmd, display = _build_shell_cmd(action, target, package)
+                    except ValueError as e:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Fehler: {e}",
+                        })
+                        continue
+
+                    # Lesend: sofort ausführen
+                    if action == "service_status":
+                        result = _run_shell_cmd(cmd)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+                        continue
+
+                    # Schreibend: Gate
+                    shell_id = str(_uuid.uuid4())
+                    _pending[shell_id] = {
+                        "type": "shell",
+                        "cmd": cmd,
+                        "display": display,
+                        "tool_use_id": block.id,
+                        "messages": messages,
+                    }
+                    prefix = " ".join(
+                        b.text for b in resp.content if hasattr(b, "text")
+                    ).strip()
+                    return (
+                        prefix or "Befehl ausführen – bitte bestätigen:",
+                        None,
+                        {"shell_id": shell_id, "cmd_display": display},
                         messages,
                     )
 
@@ -297,7 +437,7 @@ def _run_loop(messages: list, secrets: dict, max_rounds: int = 12):
             if tool_results:
                 messages = messages + [{"role": "user", "content": tool_results}]
 
-    return "Maximale Runden erreicht.", None, messages
+    return "Maximale Runden erreicht.", None, None, messages
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -322,8 +462,13 @@ def chat():
         return jsonify({"error": "Leere Nachricht"}), 400
     messages.append({"role": "user", "content": user_text})
     secrets = _load_secrets()
-    reply, pending_write, messages_out = _run_loop(messages, secrets)
-    return jsonify({"reply": reply, "pending_write": pending_write, "messages": messages_out})
+    reply, pending_write, pending_shell, messages_out = _run_loop(messages, secrets)
+    return jsonify({
+        "reply": reply,
+        "pending_write": pending_write,
+        "pending_shell": pending_shell,
+        "messages": messages_out,
+    })
 
 
 @app.route("/api/confirm-write", methods=["POST"])
@@ -350,8 +495,40 @@ def confirm_write():
         "role": "user",
         "content": [{"type": "tool_result", "tool_use_id": pending["tool_use_id"], "content": msg}],
     }]
-    reply, new_pending, messages_out = _run_loop(messages, secrets)
-    return jsonify({"reply": reply, "pending_write": new_pending, "messages": messages_out})
+    reply, new_write, new_shell, messages_out = _run_loop(messages, secrets)
+    return jsonify({
+        "reply": reply,
+        "pending_write": new_write,
+        "pending_shell": new_shell,
+        "messages": messages_out,
+    })
+
+
+@app.route("/api/confirm-shell", methods=["POST"])
+def confirm_shell():
+    data = request.get_json(silent=True) or {}
+    shell_id = data.get("shell_id", "")
+    confirmed = bool(data.get("confirmed", False))
+    pending = _pending.pop(shell_id, None)
+    if not pending:
+        return jsonify({"error": "Shell-ID unbekannt oder abgelaufen (Service-Neustart?)"}), 404
+    secrets = _load_secrets()
+    if confirmed:
+        output = _run_shell_cmd(pending["cmd"])
+        msg = f"Befehl ausgeführt:\n{output}"
+    else:
+        msg = "Befehl vom User abgelehnt."
+    messages = pending["messages"] + [{
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": pending["tool_use_id"], "content": msg}],
+    }]
+    reply, new_write, new_shell, messages_out = _run_loop(messages, secrets)
+    return jsonify({
+        "reply": reply,
+        "pending_write": new_write,
+        "pending_shell": new_shell,
+        "messages": messages_out,
+    })
 
 
 if __name__ == "__main__":

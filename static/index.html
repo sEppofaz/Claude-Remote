@@ -129,7 +129,7 @@
   #btn-send:not(:disabled):active { transform: scale(.92); }
   #btn-send svg { width: 18px; height: 18px; fill: #fff; }
 
-  /* ── Write-Gate Modal ── */
+  /* ── Action-Gate Modal (write + shell) ── */
   #overlay {
     display: none; position: fixed; inset: 0; z-index: 200;
     background: rgba(0,0,0,.45); backdrop-filter: blur(2px);
@@ -159,6 +159,7 @@
   }
   .diff-box.old .diff-head { background: #fee2e2; color: #991b1b; }
   .diff-box.new .diff-head { background: #dcfce7; color: #166534; }
+  .diff-box.cmd .diff-head { background: #fef9c3; color: #854d0e; }
   .diff-box pre {
     font-size: 12px; line-height: 1.5; padding: 8px 10px;
     overflow-x: auto; white-space: pre-wrap; word-break: break-word;
@@ -167,6 +168,7 @@
   }
   .diff-box.old pre { background: #fff1f2; color: #7f1d1d; }
   .diff-box.new pre { background: #f0fdf4; color: #14532d; }
+  .diff-box.cmd pre { background: #fefce8; color: #713f12; }
 
   #modal .btn-row { display: flex; gap: 10px; margin-top: 4px; }
   .btn-confirm, .btn-reject {
@@ -248,7 +250,8 @@
     <div class="examples">
       <button class="ex-btn" onclick="fillInput(this)">Zeige mir alle Dateien in PKA/</button>
       <button class="ex-btn" onclick="fillInput(this)">Lies das Logbuch und zeige offene Punkte</button>
-      <button class="ex-btn" onclick="fillInput(this)">Füge im Vokabeltrainer einen Logbuch-Eintrag hinzu</button>
+      <button class="ex-btn" onclick="fillInput(this)">Aktualisiere anthropic in rename-webhook</button>
+      <button class="ex-btn" onclick="fillInput(this)">Status von rename-webhook anzeigen</button>
     </div>
   </div>
 </div>
@@ -260,12 +263,12 @@
   </button>
 </div>
 
-<!-- Write-Gate Modal -->
+<!-- Action-Gate Modal (write + shell) -->
 <div id="overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
   <div id="modal">
     <h2 id="modal-title">✏️ Datei ändern – bestätigen?</h2>
     <div class="path-label" id="modal-path"></div>
-    <div class="diff-wrap">
+    <div class="diff-wrap" id="modal-diff-wrap">
       <div class="diff-box old">
         <div class="diff-head">Aktueller Inhalt</div>
         <pre id="diff-old"></pre>
@@ -273,6 +276,12 @@
       <div class="diff-box new">
         <div class="diff-head">Neuer Inhalt</div>
         <pre id="diff-new"></pre>
+      </div>
+    </div>
+    <div class="diff-wrap" id="modal-shell-wrap" style="display:none">
+      <div class="diff-box cmd">
+        <div class="diff-head">Befehl</div>
+        <pre id="shell-cmd"></pre>
       </div>
     </div>
     <div class="btn-row">
@@ -290,7 +299,7 @@
     <ul class="phase-list">
       <li><span class="done">✅ Phase 1:</span> Dropbox lesen &amp; schreiben (<code>dropbox:/Apps/Claude/**</code>)</li>
       <li><span class="planned">🔜 Phase 2:</span> GitHub API – Repos erstellen, Commits pushen</li>
-      <li><span class="planned">🔜 Phase 3:</span> Hetzner Shell – <code>git pull</code>, Services neustarten</li>
+      <li><span class="done">✅ Phase 3:</span> Hetzner Shell – <code>pip upgrade</code>, <code>git pull</code>, Services neustarten</li>
     </ul>
     <p><strong>Schreiben nur nach expliziter Bestätigung.</strong></p>
     <p><strong>Pitfall:</strong> Offene Bestätigungen gehen bei Service-Neustart verloren.</p>
@@ -312,6 +321,7 @@ let state = {
   messages: [],
   loading: false,
   pendingWriteId: null,
+  pendingShellId: null,
 };
 
 function ts() {
@@ -383,6 +393,7 @@ async function sendChat(text) {
     state.messages = data.messages || [];
     if (data.reply) appendMsg("bot", data.reply);
     if (data.pending_write) showWriteGate(data.pending_write);
+    if (data.pending_shell) showShellGate(data.pending_shell);
   } catch (e) {
     typing.remove();
     setLoading(false);
@@ -392,25 +403,45 @@ async function sendChat(text) {
 
 function showWriteGate(pw) {
   state.pendingWriteId = pw.write_id;
+  document.getElementById("modal-title").textContent = "✏️ Datei ändern – bestätigen?";
   document.getElementById("modal-path").textContent = pw.path;
+  document.getElementById("modal-diff-wrap").style.display = "";
+  document.getElementById("modal-shell-wrap").style.display = "none";
   document.getElementById("diff-old").textContent = pw.old_content || "(leer / neue Datei)";
   document.getElementById("diff-new").textContent = pw.new_content;
   overlay.classList.add("show");
 }
 
-async function resolveWrite(confirmed) {
+function showShellGate(ps) {
+  state.pendingShellId = ps.shell_id;
+  document.getElementById("modal-title").textContent = "⚡ Befehl ausführen – bestätigen?";
+  document.getElementById("modal-path").textContent = "";
+  document.getElementById("modal-diff-wrap").style.display = "none";
+  document.getElementById("modal-shell-wrap").style.display = "";
+  document.getElementById("shell-cmd").textContent = ps.cmd_display;
+  overlay.classList.add("show");
+}
+
+async function resolveAction(confirmed) {
   overlay.classList.remove("show");
-  if (!state.pendingWriteId) return;
   const writeId = state.pendingWriteId;
+  const shellId = state.pendingShellId;
   state.pendingWriteId = null;
+  state.pendingShellId = null;
+  if (!writeId && !shellId) return;
+
   setLoading(true);
   const typing = showTyping();
+  const endpoint = shellId ? "api/confirm-shell" : "api/confirm-write";
+  const body = shellId
+    ? { shell_id: shellId, confirmed }
+    : { write_id: writeId, confirmed };
 
   try {
-    const res = await fetch("api/confirm-write", {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ write_id: writeId, confirmed }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     typing.remove();
@@ -421,6 +452,7 @@ async function resolveWrite(confirmed) {
     state.messages = data.messages || [];
     if (data.reply) appendMsg("bot", data.reply);
     if (data.pending_write) showWriteGate(data.pending_write);
+    if (data.pending_shell) showShellGate(data.pending_shell);
   } catch (e) {
     typing.remove();
     setLoading(false);
@@ -445,8 +477,8 @@ btnSend.addEventListener("click", () => {
   if (!btnSend.disabled) sendChat(input.value.trim());
 });
 
-document.getElementById("btn-confirm").addEventListener("click", () => resolveWrite(true));
-document.getElementById("btn-reject").addEventListener("click",  () => resolveWrite(false));
+document.getElementById("btn-confirm").addEventListener("click", () => resolveAction(true));
+document.getElementById("btn-reject").addEventListener("click",  () => resolveAction(false));
 
 document.getElementById("btn-info").addEventListener("click", () => {
   document.getElementById("info-overlay").classList.add("show");
