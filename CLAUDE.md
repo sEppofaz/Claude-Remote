@@ -8,7 +8,7 @@ Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und 
 | Phase | Inhalt | Status |
 |-------|--------|--------|
 | 1 | Dropbox read/write/list für `/Apps/Claude/**` | ✅ umgesetzt |
-| 2 | GitHub API: Repos erstellen, Dateien pushen, Commits | geplant |
+| 2 | GitHub API: Repos erstellen, Dateien pushen, Commits | ✅ umgesetzt |
 | 3 | Hetzner Shell: `pip upgrade`, `git pull`, `systemctl restart` per Tool | ✅ umgesetzt |
 
 ## Lokaler Pfad
@@ -100,9 +100,10 @@ Claude-Remote/
 - Relative API-Pfade im Frontend (`api/chat`) → korrekt über nginx-Proxy mit trailing slash
 - **⚠️ NIEMALS `python3 -m venv --clear .` in `/opt/claude-remote/` ausführen** → löscht alle App-Dateien im Verzeichnis (Vorfall 2026-05-25). Stattdessen: frische venv außerhalb anlegen oder Dateien vorher sichern.
 
-## Phase 2 – GitHub API (geplant)
-Neues Tool `github_api` mit Aktionen: `list_repos`, `create_repo`, `read_file`, `write_file`, `list_commits`.
-Credentials: `GITHUB_TOKEN` in `/etc/pka/secrets.env`.
+## Phase 2 – GitHub API ✅
+Tool `github_api` mit Aktionen: `list_repos`, `read_file`, `list_commits` (sofort) + `write_file` (Write-Gate) + `create_repo` (Shell-Gate).
+Credentials: `GITHUB_TOKEN` in `/etc/pka/secrets.env` (muss Josef selbst eintragen).
+Dependency: `PyGithub>=2.0`.
 
 ## Phase 3 – Hetzner Shell ✅
 
