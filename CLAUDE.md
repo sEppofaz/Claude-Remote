@@ -24,7 +24,8 @@ Eigenständiger Python-Flask-KI-Agent mit direktem Dateizugriff auf Dropbox und 
 - **Systemd:** `claude-remote.service`
 - **Nginx-Pfad:** `/claude-remote/` → `http://127.0.0.1:8082/`
 - **Nginx-Config:** `/etc/nginx/sites-enabled/rename-webhook`
-- **Auth:** BasicAuth via `/etc/nginx/claude-remote.htpasswd`
+- **Auth:** Flask-Session-Login (`/login`), Session-Cookie 30 Tage; Passwort via passlib gegen `/etc/nginx/claude-remote.htpasswd`; Session-Key auto-generiert in `/opt/claude-remote/.session_key` (chmod 600)
+- **Logout:** `https://umbenennen.duckdns.org/claude-remote/logout`
 - **Secrets:** `/etc/pka/secrets.env` (gelesen via `_load_secrets()`)
 
 ### Systemd Service (`/etc/systemd/system/claude-remote.service`)
@@ -70,6 +71,7 @@ Claude-Remote/
 ├── CLAUDE.md
 └── static/
     ├── index.html      # Chat-UI (PWA)
+    ├── login.html      # Login-Formular (Flask-Session, autocomplete/Face ID)
     ├── manifest.json
     ├── sw.js
     ├── icon-192.png    # generiert via generate_icons.py
@@ -89,7 +91,9 @@ Claude-Remote/
 | `server:` | `/opt/traktoren/` |
 
 ## Pitfalls
-- **⚠️ nginx location-Block** `/claude-remote/` in `/etc/nginx/sites-enabled/rename-webhook` kann bei Aufräumaktionen versehentlich gelöscht werden → App gibt 404, Service läuft weiter. Fix: Block wiederherstellen (BasicAuth + proxy_pass 8082) + `nginx -t && systemctl reload nginx`
+- **⚠️ nginx location-Block** `/claude-remote/` in `/etc/nginx/sites-enabled/rename-webhook` kann bei Aufräumaktionen versehentlich gelöscht werden → App gibt 404, Service läuft weiter. Fix: Block wiederherstellen (proxy_pass 8082, ohne auth_basic) + `nginx -t && systemctl reload nginx`
+- **`.session_key`** in `/opt/claude-remote/.session_key` – wird beim ersten Start auto-generiert (chmod 600). Wenn gelöscht → alle Sessions ungültig, neue Logins nötig. Nicht in git.
+- **Auth ist jetzt Flask-seitig** – nginx hat keine BasicAuth mehr. Wenn Service down ist, gibt nginx 502 (nicht 401).
 - `_pending` Dict ist in-memory → offene Write-Gates gehen bei Service-Neustart verloren
 - `write_file` überschreibt immer komplett (kein Patch) → immer erst `read_file` aufrufen
 - Secrets werden bei jedem Request frisch geladen (kein Cache)
@@ -107,7 +111,8 @@ Tool `run_shell` mit Whitelist-Aktionen:
 - `pip_upgrade` – Shell-Gate (Bestätigung), alle Apps in `_VENVS`
 - `service_restart` – Shell-Gate, alle Services in `_SERVICES`
 - `git_pull` – Shell-Gate, alle Projekte in `_GIT_PROJECTS`
+- `apt_upgrade` – Shell-Gate, target=`kernel` → führt `apt-get dist-upgrade -y` aus (300s Timeout)
 
-**Sudo-Regeln:** `/etc/sudoers.d/claude-remote` (chmod 0440) – www-data darf whitelisted pip/systemctl/git als root.
+**Sudo-Regeln:** `/etc/sudoers.d/claude-remote` (chmod 0440) – www-data darf whitelisted pip/systemctl/git/apt-get als root.
 **Pitfall git pull:** Erfordert `-c safe.directory=...` (ownership-Check seit git 2.35).
 **Endpoint:** `POST /api/confirm-shell` mit `{shell_id, confirmed}`.
