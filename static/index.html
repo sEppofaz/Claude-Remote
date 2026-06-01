@@ -493,6 +493,29 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// Pull-to-Refresh: oben im Feed nach unten ziehen → Seite neu laden
+let ptStartY = 0;
+let ptActive = false;
+const PTR_THRESHOLD = 70;
+
+feed.addEventListener("touchstart", e => {
+  if (feed.scrollTop === 0 && !state.loading) {
+    ptStartY = e.touches[0].clientY;
+    ptActive = true;
+  }
+}, { passive: true });
+
+feed.addEventListener("touchmove", e => {
+  if (!ptActive) return;
+  if (e.touches[0].clientY - ptStartY > PTR_THRESHOLD) {
+    ptActive = false;
+    showToast("Wird aktualisiert…");
+    setTimeout(() => location.reload(), 400);
+  }
+}, { passive: true });
+
+feed.addEventListener("touchend", () => { ptActive = false; }, { passive: true });
+
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js", { updateViaCache: "none" })
     .then(reg => {
