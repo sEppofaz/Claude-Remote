@@ -63,7 +63,13 @@ def _get_or_create_session_key() -> str:
 
 
 app.secret_key = _get_or_create_session_key()
-app.permanent_session_lifetime = timedelta(days=30)
+app.permanent_session_lifetime = timedelta(minutes=15)
+
+
+@app.before_request
+def _refresh_session():
+    if session.get("authenticated"):
+        session.modified = True
 
 
 def _check_password(password: str) -> bool:

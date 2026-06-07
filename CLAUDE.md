@@ -99,6 +99,8 @@ Claude-Remote/
 - Secrets werden bei jedem Request frisch geladen (kein Cache)
 - Relative API-Pfade im Frontend (`api/chat`) → korrekt über nginx-Proxy mit trailing slash
 - **⚠️ NIEMALS `python3 -m venv --clear .` in `/opt/claude-remote/` ausführen** → löscht alle App-Dateien im Verzeichnis (Vorfall 2026-05-25). Stattdessen: frische venv außerhalb anlegen oder Dateien vorher sichern.
+- **`stone` darf NICHT über 3.3.1 geupdatet werden** – `dropbox 12.0.2` verlangt `stone<3.3.3`. Alle 5 venvs betroffen. Bleibt bis dropbox seinen Constraint lockert.
+- **`pydantic_core 2.47.0` ist noch nicht installierbar** – `pydantic 2.13.4` pinnt auf `pydantic_core==2.46.4` exakt. Löst sich wenn pydantic 2.14.x erscheint. `pip_upgrade` wird das als „pending" anzeigen, das ist normal.
 
 ## Phase 2 – GitHub API ✅
 Tool `github_api` mit Aktionen: `list_repos`, `read_file`, `list_commits` (sofort) + `write_file` (Write-Gate) + `create_repo` (Shell-Gate).
