@@ -57,10 +57,15 @@ ssh root@89.167.104.145 "git -C /opt/claude-remote pull && systemctl restart cla
 
 ### Icons neu generieren (lokal)
 ```bash
-cd ~/Dropbox/Apps/Claude/Claude-Remote
-python3 generate_icons.py
-# dann: git add static/*.png && commit + push + server pull
+cd ~/Dropbox/Apps/Claude/Claude-Remote/static
+qlmanage -t -s 512 -o . claude-remote-icon.svg
+sips -z 512 512 claude-remote-icon.svg.png --out icon-512.png
+sips -z 192 192 claude-remote-icon.svg.png --out icon-192.png
+sips -z 180 180 claude-remote-icon.svg.png --out apple-touch-icon.png
+rm claude-remote-icon.svg.png
+# dann: git add static/*.png static/sw.js && SW-Cache hochzählen && commit + push + server pull
 ```
+Icon-Quelle: `static/claude-remote-icon.svg` (Claudes Strahlen-Muster, Terrakotta auf Dunkel, WLAN-Bögen als Remote-Indikator). `generate_icons.py` ist obsolet.
 
 ## Dateistruktur
 ```
